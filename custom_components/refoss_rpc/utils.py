@@ -52,11 +52,14 @@ def get_refoss_channel_name(device: RpcDevice, key: str) -> str:
     if entity_name is None:
         channel = key.split(":")[0]
         channel_id = key.split(":")[-1]
-        if key.startswith(("input:", "switch:", "cover:", "em:")):
+        if key.startswith("em:"):
+            return f"{device_name} Clamp {channel_id}"
+
+        if key.startswith(("input:", "switch:", "cover:")):
             return f"{device_name} {channel.title()} {channel_id}"
 
         if key.startswith("emmerge:"):
-            return f"{device_name} {channel.title()}"
+            return f"{device_name} Merged {channel_id}"
 
         return device_name
 
@@ -171,14 +174,16 @@ def merge_channel_get_status(_status: dict[str, Any], key: str, attr: str) -> An
     bit_positions = [i for i in range(num.bit_length()) if num & (1 << i)]
 
     val = 0
+    found_any = False
     for bit in bit_positions:
         status_key = f"em:{bit + 1}"
         if status_key in _status and attr in _status[status_key]:
             val += _status[status_key][attr]
+            found_any = True
         else:
-            LOGGER.warning("Missing key %s or attribute %s in status", status_key, attr)
+            LOGGER.debug("Missing key %s or attribute %s in status", status_key, attr)
 
-    return val
+    return val if found_any else None
 
 
 def get_host(host: str) -> str:

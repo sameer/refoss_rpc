@@ -16,10 +16,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.typing import StateType
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import LOGGER
+from .const import DOMAIN, LOGGER
 from .coordinator import RefossConfigEntry, RefossCoordinator
 from .utils import (
     async_remove_refoss_entity,
+    get_refoss_channel_name,
     get_refoss_entity_name,
     get_refoss_key_instances,
     merge_channel_get_status,
@@ -45,21 +46,39 @@ def async_setup_entry_refoss(
     mac = coordinator.mac
     entities: list[Any] = []
 
-    for sensor_id, description in sensors.items():
-        key_instances = get_refoss_key_instances(device_status, description.key)
+    # Collect all unique key instances across all sensors preserving channel order
+    all_keys: list[str] = []
+    for description in sensors.values():
+        for key in get_refoss_key_instances(device_status, description.key):
+            if key not in all_keys:
+                all_keys.append(key)
 
-        for key in key_instances:
-            key_status = device_status.get(key)
-            if key_status is None:
+    def _key_sort_key(k: str) -> tuple[str, int]:
+        parts = k.split(":")
+        if len(parts) == 2 and parts[1].isdigit():
+            return (parts[0], int(parts[1]))
+        return (parts[0], 0)
+
+    all_keys.sort(key=_key_sort_key)
+
+    for key in all_keys:
+        key_status = device_status.get(key)
+        if key_status is None and not key.startswith("emmerge:"):
+            continue
+
+        for sensor_id, description in sensors.items():
+            key_instances = get_refoss_key_instances(device_status, description.key)
+            if key not in key_instances:
                 continue
 
             # Filter out sensors that are not supported or do not match the configuration
-            if (
-                not key.startswith("emmerge:")
-                and (
-                    description.sub_key not in key_status
-                    or not description.supported(key_status)
-                )
+            if key.startswith("emmerge:"):
+                if merge_channel_get_status(device_status, key, description.sub_key) is None:
+                    continue
+            elif (
+                key_status is None
+                or description.sub_key not in key_status
+                or not description.supported(key_status)
             ):
                 continue
 
@@ -100,13 +119,24 @@ class RefossEntityDescription(EntityDescription):
 class RefossEntity(CoordinatorEntity[RefossCoordinator]):
     """Helper class to represent a entity."""
 
+    _attr_has_entity_name = True
+
     def __init__(self, coordinator: RefossCoordinator, key: str) -> None:
         """Initialize Refoss entity."""
         super().__init__(coordinator)
         self.key = key
-        self._attr_device_info = DeviceInfo(
-            connections={(CONNECTION_NETWORK_MAC, coordinator.mac)}
-        )
+        if key.startswith(("em:", "emmerge:")):
+            self._attr_device_info = DeviceInfo(
+                identifiers={(DOMAIN, f"{coordinator.mac}_{key}")},
+                via_device=(CONNECTION_NETWORK_MAC, coordinator.mac),
+                name=get_refoss_channel_name(coordinator.device, key),
+                manufacturer="Refoss",
+                model=f"{coordinator.model} Clamp" if key.startswith("em:") else f"{coordinator.model} Merged Channel",
+            )
+        else:
+            self._attr_device_info = DeviceInfo(
+                connections={(CONNECTION_NETWORK_MAC, coordinator.mac)}
+            )
         self._attr_unique_id = f"{coordinator.mac}-{key}"
         self._attr_name = get_refoss_entity_name(coordinator.device, key)
 
@@ -168,9 +198,7 @@ class RefossAttributeEntity(RefossEntity):
         self.entity_description = description
 
         self._attr_unique_id = f"{super().unique_id}-{attribute}"
-        self._attr_name = get_refoss_entity_name(
-            device=coordinator.device, key=key, description=description.name
-        )
+        self._attr_name = description.name or None
         self._last_value = None
 
     @property
@@ -189,6 +217,8 @@ class RefossAttributeEntity(RefossEntity):
                     self.key,
                     self.entity_description.sub_key,
                 )
+                if val is None:
+                    return None
                 if self.entity_description.value is not None:
                     self._last_value = self.entity_description.value(
                         val, self._last_value
